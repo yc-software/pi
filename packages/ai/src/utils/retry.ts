@@ -21,6 +21,8 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	"out of budget",
 	"quota exceeded",
 	"billing",
+	"violat(?:e[sd]?|ion of) Anthropic(?:(?:'|’)s)? (?:Terms of Service|usage policy)",
+	"reduce refusals for your users by configuring a fallback model",
 ]);
 
 const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
@@ -28,12 +30,6 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"overloaded",
 	"rate.?limit",
 	"too many requests",
-	"429",
-	"500",
-	"502",
-	"503",
-	"504",
-	"524",
 	"service.?unavailable",
 	"server.?error",
 	"internal.?error",
@@ -223,5 +219,24 @@ export function isRetryableAssistantError(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error" || !message.errorMessage) return false;
 	const errorMessage = message.errorMessage;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
+	const statusMatch = errorMessage.match(
+		/^(?:[\w -]+ API error \((\d{3})\):|(?:[\w.]+(?:Error|Exception): )?(\d{3})(?=\s|:|$)|got status: (\d{3})\.)/,
+	);
+	let status = statusMatch ? Number(statusMatch[1] ?? statusMatch[2] ?? statusMatch[3]) : undefined;
+	const jsonMessage = errorMessage.replace(/^got status: [^.]+\. /, "");
+	if (status === undefined && jsonMessage.trimStart().startsWith("{")) {
+		try {
+			const error: unknown = JSON.parse(jsonMessage);
+			if (typeof error === "object" && error !== null && "error" in error) {
+				const detail = error.error;
+				if (typeof detail === "object" && detail !== null && "code" in detail && typeof detail.code === "number") {
+					status = detail.code;
+				}
+			}
+		} catch {}
+	}
+	if (status !== undefined) {
+		return [408, 409, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529].includes(status);
+	}
 	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
 }

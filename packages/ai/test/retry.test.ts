@@ -14,6 +14,69 @@ const wrappedDnsLookupError =
 	"The pending stream has been canceled (caused by: getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com)";
 
 describe("provider retry classification", () => {
+	it.each([408, 409, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529])(
+		"recognizes normalized transient HTTP status %s",
+		(status) => {
+			for (const errorMessage of [
+				`OpenAI API error (${status}): ${status} status code (no body)`,
+				`${status} status code (no body)`,
+				`${status}: upstream failure`,
+			]) {
+				expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(
+					true,
+				);
+			}
+		},
+	);
+	it.each([400, 401, 403, 404, 501, 505])("does not retry known terminal HTTP status %s", (status) => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: `OpenAI API error (${status}): provider returned error`,
+				}),
+			),
+		).toBe(false);
+	});
+	it("does not mistake numbers in unrelated errors for HTTP statuses", () => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "invalid argument: 500 tokens requested" }),
+			),
+		).toBe(false);
+	});
+	it.each([
+		"502 Bad Gateway",
+		"502 Bad Gateway: upstream failed",
+		"UnknownError: 502: upstream failed",
+		'{"error":{"code":503,"message":"Unavailable"}}',
+		'{"error":{"message":"Unavailable","code":503}}',
+		'got status: 502. {"error":{"message":"Bad gateway","code":502}}',
+		'got status: UNAVAILABLE. {"error":{"message":"Bad gateway","code":503,"status":"UNAVAILABLE"}}',
+	])("retries provider SDK status format: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+	it.each([
+		"401 Provider returned error",
+		"UnknownError: 403: provider returned error",
+		'{"error":{"message":"provider returned error","code":403}}',
+		'got status: 401. {"error":{"message":"provider returned error","code":401}}',
+		'got status: UNAUTHENTICATED. {"error":{"message":"provider returned error","code":401}}',
+	])("keeps terminal SDK statuses terminal: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+	it("refusal and quota remain terminal even with transient-looking status or wording", () => {
+		for (const errorMessage of [
+			"429: insufficient_quota",
+			"503: Request would violate Anthropic’s usage policy",
+			"Provider returned error: request violates Anthropic usage policy",
+			"Provider returned error: request violates Anthropic's Terms of Service",
+			"provider returned error: reduce refusals for your users by configuring a fallback model",
+		]) {
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+		}
+	});
+
 	it("matches explicit provider retry guidance", () => {
 		expect(
 			isRetryableAssistantError(
