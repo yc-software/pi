@@ -49,7 +49,7 @@ describe("normalizeProviderError", () => {
 
 			expect(error.status).toBeUndefined();
 			expect(norm.status).toBe(Number(code));
-			expect(formatProviderError(norm)).toBe(`${code}: ${JSON.stringify(body)}`);
+			expect(formatProviderError(norm)).toBe(`${code}: ${JSON.stringify({ code, message: body.message })}`);
 		},
 	);
 
@@ -85,6 +85,41 @@ describe("normalizeProviderError", () => {
 			retryable,
 		);
 	});
+
+	it.each([
+		{
+			message: "Incorrect API key provided",
+			code: 401,
+			type: "authentication_error",
+			metadata: { request_id: "req_abc500def" },
+		},
+		{ message: "Incorrect API key provided", code: 401, type: "server_error" },
+		{ diagnostic: "x".repeat(4500), message: "quota exceeded", code: "429", type: "insufficient_quota" },
+		{ diagnostic: "x".repeat(4500), message: "Something went wrong", code: "429", type: "insufficient_quota" },
+		{ message: `${"x".repeat(4500)} quota exceeded`, code: "429", type: "upstream_error" },
+	])("keeps primary terminal stream errors terminal: $code/$type", (body) => {
+		const error = new APIError(undefined, body, undefined, undefined);
+		const errorMessage = formatProviderError(normalizeProviderError(error));
+
+		expect(errorMessage).toContain(error.message);
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
+	it.each([undefined, {}, { reason: "insufficient_quota" }, ["insufficient_quota"]])(
+		"ignores non-string stream error types: %s",
+		(type) => {
+			const error = new APIError(
+				undefined,
+				{ message: "Something went wrong", code: "500", type },
+				undefined,
+				undefined,
+			);
+			const errorMessage = formatProviderError(normalizeProviderError(error));
+
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+			expect(errorMessage).not.toContain("insufficient_quota");
+		},
+	);
 
 	it("preserves the message when @google/genai already folds the body into it", () => {
 		const body = { error: { code: 403, message: "Permission denied" } };
