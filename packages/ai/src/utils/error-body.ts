@@ -63,6 +63,12 @@ function extractStatus(error: SdkErrorShape): number | undefined {
 	if (typeof error.status === "number") return error.status;
 	if (typeof error.$metadata?.httpStatusCode === "number") return error.$metadata.httpStatusCode;
 	if (typeof error.$response?.statusCode === "number") return error.$response.statusCode;
+	if (typeof error.error === "object" && error.error !== null && "code" in error.error) {
+		const code = error.error.code;
+		if ((typeof code === "number" || typeof code === "string") && /^[45]\d{2}$/.test(String(code))) {
+			return Number(code);
+		}
+	}
 	return undefined;
 }
 
