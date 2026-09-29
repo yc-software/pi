@@ -42,6 +42,28 @@ export function normalizeProviderError(error: unknown): NormalizedProviderError 
 
 	const sdkError = error as SdkErrorShape;
 	const status = extractStatus(sdkError);
+	if (
+		status === undefined &&
+		typeof sdkError.error === "object" &&
+		sdkError.error !== null &&
+		"code" in sdkError.error
+	) {
+		const code = sdkError.error.code;
+		if ((typeof code === "number" || typeof code === "string") && /^[45]\d{2}$/.test(String(code))) {
+			const streamStatus = Number(code);
+			const type = "type" in sdkError.error ? sdkError.error.type : undefined;
+			return {
+				status: streamStatus,
+				body: safeJsonStringify({
+					code,
+					...((streamStatus === 429 || streamStatus >= 500) && typeof type === "string" ? { type } : {}),
+					message: error.message,
+				}),
+				message: error.message,
+				messageCarriesBody: false,
+			};
+		}
+	}
 	const body = extractBody(sdkError);
 	const messageCarriesBody = body === undefined || error.message.includes(body);
 

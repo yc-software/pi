@@ -5,8 +5,11 @@
 // Bedrock ServiceException), plus the non-Error fallback, truncation, the empty
 // parsed-body edge case, and the formatProviderError compose helper.
 
+import { APIError } from "openai";
 import { describe, expect, it } from "vitest";
+import { fauxAssistantMessage } from "../src/providers/faux.ts";
 import { formatProviderError, MAX_PROVIDER_ERROR_BODY_CHARS, normalizeProviderError } from "../src/utils/error-body.ts";
+import { isRetryableAssistantError } from "../src/utils/retry.ts";
 
 describe("normalizeProviderError", () => {
 	it("extracts status and body from a Mistral-shaped error", () => {
@@ -36,6 +39,87 @@ describe("normalizeProviderError", () => {
 		expect(norm.body).toBe('{"error":"blocked by gateway WAF"}');
 		expect(norm.messageCarriesBody).toBe(false);
 	});
+
+	it.each([400, "401", 403, "429", 500, "502", 503, "504", 599])(
+		"extracts an HTTP error code from an SDK stream error: %s",
+		(code) => {
+			const body = { message: "Something went wrong", code };
+			const error = new APIError(undefined, body, body.message, undefined);
+			const norm = normalizeProviderError(error);
+
+			expect(error.status).toBeUndefined();
+			expect(norm.status).toBe(Number(code));
+			expect(formatProviderError(norm)).toBe(`${code}: ${JSON.stringify({ code, message: body.message })}`);
+		},
+	);
+
+	it.each([undefined, null, "server_error", "500x", " 500", 200, 600, 500.1, {}, [500]])(
+		"does not treat an arbitrary stream error code as an HTTP status: %s",
+		(code) => {
+			const error = new APIError(undefined, { message: "Something went wrong", code }, undefined, undefined);
+
+			expect(normalizeProviderError(error).status).toBeUndefined();
+		},
+	);
+
+	it("prefers the HTTP status over a parsed error code", () => {
+		const error = new APIError(403, { message: "Permission denied", code: "500" }, undefined, undefined);
+
+		expect(normalizeProviderError(error).status).toBe(403);
+	});
+
+	it.each([
+		{ code: "429", type: "rate_limit_error", retryable: true },
+		{ code: "500", type: "upstream_error", retryable: true },
+		{ code: "503", type: "upstream_error", retryable: true },
+		{ code: "400", type: "invalid_request_error", retryable: false },
+		{ code: "401", type: "authentication_error", retryable: false },
+		{ code: "403", type: "permission_error", retryable: false },
+		{ code: "429", type: "insufficient_quota", retryable: false },
+		{ code: "unknown", type: "unknown", retryable: false },
+	])("retains the retry classification for $code/$type", ({ code, type, retryable }) => {
+		const error = new APIError(undefined, { message: "Something went wrong", code, type }, undefined, undefined);
+		const errorMessage = formatProviderError(normalizeProviderError(error));
+
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(
+			retryable,
+		);
+	});
+
+	it.each([
+		{
+			message: "Incorrect API key provided",
+			code: 401,
+			type: "authentication_error",
+			metadata: { request_id: "req_abc500def" },
+		},
+		{ message: "Incorrect API key provided", code: 401, type: "server_error" },
+		{ diagnostic: "x".repeat(4500), message: "quota exceeded", code: "429", type: "insufficient_quota" },
+		{ diagnostic: "x".repeat(4500), message: "Something went wrong", code: "429", type: "insufficient_quota" },
+		{ message: `${"x".repeat(4500)} quota exceeded`, code: "429", type: "upstream_error" },
+	])("keeps primary terminal stream errors terminal: $code/$type", (body) => {
+		const error = new APIError(undefined, body, undefined, undefined);
+		const errorMessage = formatProviderError(normalizeProviderError(error));
+
+		expect(errorMessage).toContain(error.message);
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
+	it.each([undefined, {}, { reason: "insufficient_quota" }, ["insufficient_quota"]])(
+		"ignores non-string stream error types: %s",
+		(type) => {
+			const error = new APIError(
+				undefined,
+				{ message: "Something went wrong", code: "500", type },
+				undefined,
+				undefined,
+			);
+			const errorMessage = formatProviderError(normalizeProviderError(error));
+
+			expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+			expect(errorMessage).not.toContain("insufficient_quota");
+		},
+	);
 
 	it("preserves the message when @google/genai already folds the body into it", () => {
 		const body = { error: { code: 403, message: "Permission denied" } };
